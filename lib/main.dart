@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import 'database_helper.dart';
 import 'backup_service.dart';
@@ -34,7 +35,18 @@ class _SmartAccountantAppState extends State<SmartAccountantApp> {
   @override
   void initState() {
     super.initState();
+    _requestPermissions();
     _loadLang();
+  }
+
+  Future<void> _requestPermissions() async {
+    try {
+      if (await Permission.storage.isDenied) {
+        await Permission.storage.request();
+      }
+    } catch (e) {
+      print('Error requesting permissions: $e');
+    }
   }
 
   Future<void> _loadLang() async {

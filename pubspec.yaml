@@ -1,4 +1,4 @@
-name: smart
+name: smart_accountant
 description: تطبيق محاسبي متكامل
 publish_to: 'none'
 version: 1.0.0+1
@@ -29,13 +29,17 @@ dependencies:
   # مسار الملفات
   path_provider: ^2.1.0
   
-  # للتعامل مع JSON
+  # أيقونات التطبيق
   flutter_launcher_icons: ^0.13.1
+  
+  # أذونات التطبيق
+  permission_handler: ^11.0.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
-  test: ^1.24.0  
+  test: ^1.24.0
+
 flutter:
   uses-material-design: true
