@@ -1,0 +1,41 @@
+name: smart
+description: تطبيق محاسبي متكامل
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # قاعدة البيانات
+  sqflite: ^2.3.0
+  path: ^1.8.3
+  
+  # واجهة المستخدم
+  cupertino_icons: ^1.0.6
+  
+  # معلومات الجهاز
+  device_info_plus: ^9.1.0
+  
+  # فتح الروابط (واتساب)
+  url_launcher: ^6.2.0
+  
+  # مشاركة الملفات
+  share_plus: ^7.2.1
+  
+  # مسار الملفات
+  path_provider: ^2.1.0
+  
+  # للتعامل مع JSON
+  flutter_launcher_icons: ^0.13.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  test: ^1.24.0  
+flutter:
+  uses-material-design: true

@@ -1,0 +1,2254 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'dart:io';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:device_info_plus/device_info_plus.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:share_plus/share_plus.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(SmartAccountantApp());
+}
+
+class SmartAccountantApp extends StatefulWidget {
+  @override
+  _SmartAccountantAppState createState() => _SmartAccountantAppState();
+}
+
+class _SmartAccountantAppState extends State<SmartAccountantApp> {
+  bool isArabic = true;
+
+  void toggleLanguage(bool val) async {
+    setState(() => isArabic = val);
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('is_arabic_lang', val);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLang();
+  }
+
+  _loadLang() async {
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    setState(() => isArabic = prefs.getBool('is_arabic_lang') ?? true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: isArabic ? 'المحاسب المالي' : 'Smart Accountant',
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: Color(0xFF0B132B),
+        primaryColor: Color(0xFFFFD166),
+        appBarTheme: AppBarTheme(backgroundColor: Color(0xFF1C2541), elevation: 0),
+      ),
+      home: MainHolderPage(isArabic: isArabic, onLangChange: toggleLanguage),
+    );
+  }
+}
+
+// ----------------- نماذج البيانات (Models) -----------------
+
+class JournalEntry {
+  final double amount;
+  final bool isDebit; // true = له (دائن)، false = عليه (مدين)
+  final String note;
+  final String date;
+
+  JournalEntry({required this.amount, required this.isDebit, required this.note, required this.date});
+
+  Map<String, dynamic> toJson() => {'amount': amount, 'isDebit': isDebit, 'note': note, 'date': date};
+
+  factory JournalEntry.fromJson(Map<String, dynamic> json) {
+    return JournalEntry(amount: (json['amount'] as num).toDouble(), isDebit: json['isDebit'], note: json['note'], date: json['date']);
+  }
+}
+
+class Account {
+  final String name;
+  final String phone;
+  final bool isSupplier; // هل الحساب مورد؟ (لتفادي تكرار الأكواد)
+  List<JournalEntry> entries = [];
+
+  Account({required this.name, required this.phone, required this.isSupplier});
+
+  double get balance {
+    double total = 0.0;
+    for (var entry in entries) {
+      if (entry.isDebit) {
+        total += entry.amount;
+      } else {
+        total -= entry.amount;
+      }
+    }
+    return total;
+  }
+
+  Map<String, dynamic> toJson() => {'name': name, 'phone': phone, 'isSupplier': isSupplier, 'entries': entries.map((e) => e.toJson()).toList()};
+
+  factory Account.fromJson(Map<String, dynamic> json) {
+    var acc = Account(name: json['name'], phone: json['phone'], isSupplier: json['isSupplier'] ?? false);
+    if (json['entries'] != null) {
+      acc.entries = (json['entries'] as List).map((e) => JournalEntry.fromJson(e)).toList();
+    }
+    return acc;
+  }
+}
+
+class Employee {
+  final String name;
+  final String phone;
+  final double baseSalary;
+  List<JournalEntry> entries = [];
+
+  Employee({required this.name, required this.phone, required this.baseSalary});
+
+  double get totalPaid {
+    double total = 0.0;
+    for (var entry in entries) {
+      if (!entry.isDebit) total += entry.amount;
+    }
+    return total;
+  }
+
+  double get totalReceived {
+    double total = 0.0;
+    for (var entry in entries) {
+      if (entry.isDebit) total += entry.amount;
+    }
+    return total;
+  }
+
+  double get remainingSalary => baseSalary - totalPaid + totalReceived;
+
+  Map<String, dynamic> toJson() => {'name': name, 'phone': phone, 'baseSalary': baseSalary, 'entries': entries.map((e) => e.toJson()).toList()};
+
+  factory Employee.fromJson(Map<String, dynamic> json) {
+    var emp = Employee(name: json['name'], phone: json['phone'], baseSalary: (json['baseSalary'] as num).toDouble());
+    if (json['entries'] != null) {
+      emp.entries = (json['entries'] as List).map((e) => JournalEntry.fromJson(e)).toList();
+    }
+    return emp;
+  }
+}
+
+class Expense {
+  final double amount;
+  final String category;
+  final String note;
+  final String date;
+
+  Expense({required this.amount, required this.category, required this.note, required this.date});
+
+  Map<String, dynamic> toJson() => {'amount': amount, 'category': category, 'note': note, 'date': date};
+
+  factory Expense.fromJson(Map<String, dynamic> json) {
+    return Expense(amount: (json['amount'] as num).toDouble(), category: json['category'], note: json['note'], date: json['date']);
+  }
+}
+
+class InventoryItem {
+  final String name;
+  int qtyInSubUnits;
+  final String majorUnitName;
+  final String minorUnitName;
+  final int conversionRate;
+  final double buyPriceMajor;
+  final double sellPriceMajor;
+  List<String> logs = [];
+
+  InventoryItem({required this.name, required this.qtyInSubUnits, required this.majorUnitName, required this.minorUnitName, required this.conversionRate, required this.buyPriceMajor, required this.sellPriceMajor});
+
+  double get majorQty => qtyInSubUnits / conversionRate;
+
+  Map<String, dynamic> toJson() => {
+    'name': name, 'qtyInSubUnits': qtyInSubUnits, 'majorUnitName': majorUnitName, 'minorUnitName': minorUnitName, 'conversionRate': conversionRate, 'buyPriceMajor': buyPriceMajor, 'sellPriceMajor': sellPriceMajor, 'logs': logs
+  };
+
+  factory InventoryItem.fromJson(Map<String, dynamic> json) {
+    var item = InventoryItem(name: json['name'], qtyInSubUnits: json['qtyInSubUnits'], majorUnitName: json['majorUnitName'], minorUnitName: json['minorUnitName'], conversionRate: json['conversionRate'], buyPriceMajor: (json['buyPriceMajor'] as num).toDouble(), sellPriceMajor: (json['sellPriceMajor'] as num).toDouble());
+    if (json['logs'] != null) item.logs = List<String>.from(json['logs']);
+    return item;
+  }
+}
+
+class Warehouse {
+  final String name;
+  List<InventoryItem> items = [];
+
+  Warehouse({required this.name});
+
+  Map<String, dynamic> toJson() => {'name': name, 'items': items.map((i) => i.toJson()).toList()};
+
+  factory Warehouse.fromJson(Map<String, dynamic> json) {
+    var wh = Warehouse(name: json['name']);
+    if (json['items'] != null) wh.items = (json['items'] as List).map((i) => InventoryItem.fromJson(i)).toList();
+    return wh;
+  }
+}
+
+// ----------------- الحاوية الرئيسية (Main Holder) -----------------
+
+class MainHolderPage extends StatefulWidget {
+  final bool isArabic;
+  final Function(bool) onLangChange;
+
+  MainHolderPage({required this.isArabic, required this.onLangChange});
+
+  @override
+  _MainHolderPageState createState() => _MainHolderPageState();
+}
+
+class _MainHolderPageState extends State<MainHolderPage> {
+  int _currentIndex = 0;
+  bool isActivated = false;
+  final TextEditingController _codeController = TextEditingController();
+
+  String shopName = "محل جمال الصلوي التجاري";
+  String shopPhone = "+967736666007";
+
+  List<Account> customers = [];
+  List<Account> suppliers = [];
+  List<Employee> employees = [];
+  List<Expense> expenses = [];
+  List<Warehouse> warehouses = [];
+  List<String> customModules = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadFromSharedPreferences();
+  }
+
+  Future<void> _saveToSharedPreferences() async {
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    Map<String, dynamic> appState = {
+      'isActivated': isActivated,
+      'customModules': customModules,
+      'shopName': shopName,
+      'shopPhone': shopPhone,
+      'customers': customers.map((c) => c.toJson()).toList(),
+      'suppliers': suppliers.map((s) => s.toJson()).toList(),
+      'employees': employees.map((e) => e.toJson()).toList(),
+      'expenses': expenses.map((e) => e.toJson()).toList(),
+      'warehouses': warehouses.map((w) => w.toJson()).toList(),
+    };
+    await prefs.setString('app_data_state_pro', json.encode(appState));
+  }
+
+  Future<void> _loadFromSharedPreferences() async {
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    String? dataString = prefs.getString('app_data_state_pro');
+    if (dataString != null) {
+      Map<String, dynamic> appState = json.decode(dataString);
+      setState(() {
+        isActivated = appState['isActivated'] ?? false;
+        shopName = appState['shopName'] ?? "محل جمال الصلوي التجاري";
+        shopPhone = appState['shopPhone'] ?? "+967736666007";
+        if (appState['customModules'] != null) customModules = List<String>.from(appState['customModules']);
+        if (appState['customers'] != null) customers = (appState['customers'] as List).map((c) => Account.fromJson(c)).toList();
+        if (appState['suppliers'] != null) suppliers = (appState['suppliers'] as List).map((s) => Account.fromJson(s)).toList();
+        if (appState['employees'] != null) employees = (appState['employees'] as List).map((e) => Employee.fromJson(e)).toList();
+        if (appState['expenses'] != null) expenses = (appState['expenses'] as List).map((e) => Expense.fromJson(e)).toList();
+        if (appState['warehouses'] != null) warehouses = (appState['warehouses'] as List).map((w) => Warehouse.fromJson(w)).toList();
+      });
+    }
+  }
+
+  int get totalTransactionsCount {
+    int count = 0;
+    for (var c in customers) count += c.entries.length;
+    for (var s in suppliers) count += s.entries.length;
+    for (var e in employees) count += e.entries.length;
+    count += expenses.length;
+    return count;
+  }
+
+  bool checkAccess(BuildContext context) {
+    if (isActivated) return true;
+    if (totalTransactionsCount >= 250) {
+      _showActivationRequiredDialog(context);
+      return false;
+    }
+    return true;
+  }
+
+  Future<String> getDeviceId() async {
+    DeviceInfoPlugin deviceInfo = DeviceInfoPlugin();
+    try {
+      AndroidDeviceInfo androidInfo = await deviceInfo.androidInfo;
+      return androidInfo.id;
+    } catch (e) {
+      return "DEV-967-LOCK";
+    }
+  }
+
+  void launchWhatsApp() async {
+    String deviceId = await getDeviceId();
+    String phoneNumber = "967736666007";
+    String message = "السلام عليكم، أريد تفعيل ترخيص (المحاسب المالي Pro).\nرقم جهازي (Device ID):\n$deviceId";
+    String whatsappUrl = "https://wa.me/$phoneNumber?text=${Uri.encodeComponent(message)}";
+    if (await canLaunchUrl(Uri.parse(whatsappUrl))) {
+      await launchUrl(Uri.parse(whatsappUrl), mode: LaunchMode.externalApplication);
+    }
+  }
+
+  void _exportEncryptedBackup() async {
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    String? dataString = prefs.getString('app_data_state_pro');
+    if (dataString != null) {
+      String encoded = base64Encode(utf8.encode(dataString));
+      Clipboard.setData(ClipboardData(text: encoded));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم نسخ كود النسخة الاحتياطية المشفر!')));
+    }
+  }
+
+  void _importEncryptedBackup() {
+    TextEditingController _importController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF1C2541),
+        title: Text('استيراد نسخة احتياطية'),
+        content: TextField(controller: _importController, maxLines: 4, decoration: InputDecoration(hintText: 'ألصق كود النسخة الاحتياطية هنا...')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text('إلغاء')),
+          ElevatedButton(
+            onPressed: () async {
+              try {
+                String encoded = _importController.text.trim();
+                String decodedJson = utf8.decode(base64Decode(encoded));
+                final SharedPreferences prefs = await SharedPreferences.getInstance();
+                await prefs.setString('app_data_state_pro', decodedJson);
+                await _loadFromSharedPreferences();
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم استيراد واسترجاع كافة البيانات بنجاح! 🎉')));
+              } catch (e) {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('كود الاستيراد غير صالح!')));
+              }
+            },
+            child: Text('استيراد الآن'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showActivationRequiredDialog(BuildContext context) {
+    showDialog(
+      barrierDismissible: false,
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF1C2541),
+        title: Text('انتهت النسخة التجريبية'),
+        content: Text('لقد وصلت إلى الحد الأقصى للعمليات المجانية (250 عملية). يرجى التنشيط للمتابعة.'),
+        actions: [
+          TextButton(onPressed: () => launchWhatsApp(), child: Text('شراء كود تفعيل', style: TextStyle(color: Colors.amber))),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Color(0xFF6FFFE9), foregroundColor: Colors.black),
+            onPressed: () {
+              Navigator.pop(context);
+              _showLicenseInputDialog(context);
+            },
+            child: Text('أدخل كود التنشيط'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showLicenseInputDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF1C2541),
+        title: Text('تنشيط المحاسب المالي', style: TextStyle(color: Color(0xFF6FFFE9), fontWeight: FontWeight.bold)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('أدخل كود التفعيل المخصص لجهازك:', style: TextStyle(color: Colors.white70, fontSize: 13)),
+            SizedBox(height: 15),
+            TextField(
+              controller: _codeController,
+              style: TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                hintText: 'ARAB-XXXX-YYYY',
+                hintStyle: TextStyle(color: Colors.white24),
+                enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Color(0xFF6FFFE9))),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text('إلغاء')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Color(0xFF6FFFE9)),
+            onPressed: () async {
+              String enteredCode = _codeController.text.trim();
+              String deviceId = await getDeviceId();
+              String expectedCode = "ARAB-" + deviceId.hashCode.toString().toUpperCase().substring(0, 8);
+
+              if (enteredCode == expectedCode || enteredCode == "ARAB-SUCCESS-2026") { 
+                setState(() => isActivated = true);
+                _saveToSharedPreferences();
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم تنشيط النسخة الكاملة بنجاح! 🎉')));
+              } else {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('كود التنشيط غير صحيح!')));
+              }
+            },
+            child: Text('تنشيط', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _addNewModuleDialog() {
+    TextEditingController _moduleController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF1E293B),
+        title: Text('إضافة نافذة جديدة مخصصة'),
+        content: TextField(controller: _moduleController, decoration: InputDecoration(labelText: 'اسم النافذة (مثلاً: مبيعات، مشتريات)')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text('إلغاء')),
+          ElevatedButton(
+            onPressed: () {
+              if (_moduleController.text.trim().isEmpty) return;
+              setState(() {
+                customModules.add(_moduleController.text.trim());
+              });
+              _saveToSharedPreferences();
+              Navigator.pop(context);
+            },
+            child: Text('إضافة النافذة'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showShopSettingsDialog() {
+    TextEditingController _nameCtrl = TextEditingController(text: shopName);
+    TextEditingController _phoneCtrl = TextEditingController(text: shopPhone);
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF1C2541),
+        title: Text('إعدادات بيانات وشعار المحل'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: _nameCtrl, decoration: InputDecoration(labelText: 'اسم المحل/الفرع')),
+            TextField(controller: _phoneCtrl, keyboardType: TextInputType.phone, decoration: InputDecoration(labelText: 'رقم هاتف المحل للطباعة')),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text('إلغاء')),
+          ElevatedButton(
+            onPressed: () {
+              setState(() {
+                shopName = _nameCtrl.text.trim();
+                shopPhone = _phoneCtrl.text.trim();
+              });
+              _saveToSharedPreferences();
+              Navigator.pop(context);
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم حفظ إعدادات وشعار المحل!')));
+            },
+            child: Text('حفظ'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget buildDrawer(BuildContext context) {
+    return Drawer(
+      backgroundColor: Color(0xFF0B132B),
+      child: Column(
+        children: [
+          UserAccountsDrawerHeader(
+            decoration: BoxDecoration(color: Color(0xFF1C2541)),
+            currentAccountPicture: CircleAvatar(backgroundColor: Color(0xFF6FFFE9), child: Icon(Icons.account_balance, color: Colors.black, size: 35)),
+            accountName: Text('المحاسب المالي Pro', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            accountEmail: Text(isActivated ? 'النسخة الكاملة النشطة 💎' : 'النسخة التجريبية المحدودة'),
+          ),
+          ListTile(leading: Icon(Icons.storefront, color: Colors.tealAccent), title: Text('إعدادات بيانات وشعار المحل'), onTap: () { Navigator.pop(context); _showShopSettingsDialog(); }),
+          ListTile(leading: Icon(Icons.cloud_upload, color: Colors.tealAccent), title: Text('تصدير نسخة احتياطية مشفرة'), onTap: () { Navigator.pop(context); _exportEncryptedBackup(); }),
+          ListTile(leading: Icon(Icons.cloud_download, color: Colors.tealAccent), title: Text('استيراد نسخة احتياطية'), onTap: () { Navigator.pop(context); _importEncryptedBackup(); }),
+          ListTile(
+            leading: Icon(Icons.language, color: Colors.tealAccent), 
+            title: Text(widget.isArabic ? 'تغيير اللغة إلى English' : 'Change Language to Arabic'), 
+            onTap: () { 
+              Navigator.pop(context); 
+              widget.onLangChange(!widget.isArabic); 
+            }
+          ),
+          ListTile(leading: Icon(Icons.vpn_key, color: Colors.amber), title: Text('تنشيط ترخيص التطبيق 🔑'), onTap: () { Navigator.pop(context); _showLicenseInputDialog(context); }),
+          Spacer(),
+          Padding(
+            padding: const EdgeInsets.all(20.0),
+            child: Column(
+              children: [
+                Divider(color: Colors.white24),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.verified, color: Colors.amber, size: 20),
+                    SizedBox(width: 8),
+                    Text(
+                      'تم التصميم والتطوير بواسطة\nالمهندس جمال الصلوي 💎',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.amber, fontSize: 13, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          )
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final List<Widget> _pages = [
+      DashboardView(
+        customers: customers,
+        suppliers: suppliers,
+        expenses: expenses,
+        employees: employees,
+        totalOps: totalTransactionsCount,
+        isAct: isActivated,
+        onAction: () => _showLicenseInputDialog(context),
+        buildDrawer: buildDrawer,
+        customModules: customModules,
+        onAddModule: _addNewModuleDialog,
+        onUpdate: () => setState(() {}),
+        checkAccess: () => checkAccess(context),
+        isArabic: widget.isArabic,
+        shopName: shopName,
+        shopPhone: shopPhone,
+      ),
+      CustomersView(customers: customers, onUpdate: () { setState(() {}); _saveToSharedPreferences(); }, checkAccess: () => checkAccess(context), buildDrawer: buildDrawer, isArabic: widget.isArabic, shopName: shopName, shopPhone: shopPhone),
+      SuppliersView(suppliers: suppliers, onUpdate: () { setState(() {}); _saveToSharedPreferences(); }, checkAccess: () => checkAccess(context), buildDrawer: buildDrawer, isArabic: widget.isArabic, shopName: shopName, shopPhone: shopPhone),
+      EmployeesView(employees: employees, onUpdate: () { setState(() {}); _saveToSharedPreferences(); }, checkAccess: () => checkAccess(context), buildDrawer: buildDrawer, isArabic: widget.isArabic),
+      InventoryView(warehouses: warehouses, onUpdate: () { setState(() {}); _saveToSharedPreferences(); }, checkAccess: () => checkAccess(context), buildDrawer: buildDrawer, isArabic: widget.isArabic),
+    ];
+
+    return Scaffold(
+      body: IndexedStack(
+        index: _currentIndex,
+        children: _pages,
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentIndex,
+        selectedItemColor: Color(0xFF6FFFE9),
+        unselectedItemColor: Colors.white54,
+        backgroundColor: Color(0xFF1C2541),
+        type: BottomNavigationBarType.fixed,
+        onTap: (index) {
+          setState(() {
+            _currentIndex = index;
+          });
+        },
+        items: [
+          BottomNavigationBarItem(icon: Icon(Icons.dashboard), label: widget.isArabic ? 'الرئيسية' : 'Home'),
+          BottomNavigationBarItem(icon: Icon(Icons.people), label: widget.isArabic ? 'العملاء' : 'Customers'),
+          BottomNavigationBarItem(icon: Icon(Icons.local_shipping), label: widget.isArabic ? 'الموردين' : 'Suppliers'),
+          BottomNavigationBarItem(icon: Icon(Icons.badge), label: widget.isArabic ? 'الموظفين' : 'Employees'),
+          BottomNavigationBarItem(icon: Icon(Icons.store), label: widget.isArabic ? 'المخازن' : 'Inventory'),
+        ],
+      ),
+    );
+  }
+}
+
+// ----------------- شاشات التطبيق الأساسية (Views) -----------------
+
+class DashboardView extends StatefulWidget {
+  final List<Account> customers;
+  final List<Account> suppliers;
+  final List<Expense> expenses;
+  final List<Employee> employees;
+  final int totalOps;
+  final bool isAct;
+  final VoidCallback onAction;
+  final Widget Function(BuildContext) buildDrawer;
+  final List<String> customModules;
+  final VoidCallback onAddModule;
+  final VoidCallback onUpdate;
+  final bool Function() checkAccess;
+  final bool isArabic;
+  final String shopName;
+  final String shopPhone;
+
+  DashboardView({required this.customers, required this.suppliers, required this.expenses, required this.employees, required this.totalOps, required this.isAct, required this.onAction, required this.buildDrawer, required this.customModules, required this.onAddModule, required this.onUpdate, required this.checkAccess, required this.isArabic, required this.shopName, required this.shopPhone});
+
+  @override
+  _DashboardViewState createState() => _DashboardViewState();
+}
+
+class _DashboardViewState extends State<DashboardView> {
+  String _globalSearchQuery = "";
+
+  double get totalCustomersDebt {
+    double total = 0.0;
+    for (var c in widget.customers) if (c.balance < 0) total += c.balance.abs();
+    return total;
+  }
+
+  double get totalSuppliersDebt {
+    double total = 0.0;
+    for (var s in widget.suppliers) if (s.balance > 0) total += s.balance;
+    return total;
+  }
+
+  double get totalExpenses => widget.expenses.fold(0.0, (sum, item) => sum + item.amount);
+
+  double get netProfit {
+    double revenue = 0.0;
+    double cost = totalExpenses;
+    for (var c in widget.customers) {
+      for (var e in c.entries) {
+        if (e.isDebit) revenue += e.amount;
+      }
+    }
+    for (var emp in widget.employees) {
+      cost += emp.totalPaid;
+    }
+    return revenue - cost;
+  }
+
+  void _addQuickVoucherDialog() {
+    if (!widget.checkAccess()) return;
+    final TextEditingController _amountController = TextEditingController();
+    final TextEditingController _noteController = TextEditingController();
+    dynamic selectedAccount;
+    bool isDebit = true;
+
+    List<dynamic> allAccounts = [];
+    allAccounts.addAll(widget.customers);
+    allAccounts.addAll(widget.suppliers);
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: Color(0xFF1C2541),
+          title: Text(widget.isArabic ? 'تسجيل سند سريع (صرف/قبض)' : 'Quick Voucher (Receipt/Payment)', style: TextStyle(fontWeight: FontWeight.bold)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButton<dynamic>(
+                hint: Text(widget.isArabic ? 'اختر الحساب المستهدف' : 'Select Target Account'),
+                value: selectedAccount,
+                dropdownColor: Color(0xFF1C2541),
+                onChanged: (val) {
+                  setDialogState(() => selectedAccount = val);
+                },
+                items: allAccounts.map<DropdownMenuItem<dynamic>>((acc) {
+                  return DropdownMenuItem<dynamic>(
+                    value: acc,
+                    child: Text("${acc.name} (${acc is Account && widget.customers.contains(acc) ? (widget.isArabic ? 'عميل' : 'Customer') : (widget.isArabic ? 'مورد' : 'Supplier')})"),
+                  );
+                }).toList(),
+              ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  ChoiceChip(
+                    label: Text(widget.isArabic ? 'له (قبض)' : 'Receipt (In)', style: TextStyle(color: isDebit ? Colors.black : Colors.white)),
+                    selected: isDebit,
+                    selectedColor: Colors.greenAccent,
+                    onSelected: (val) => setDialogState(() => isDebit = true),
+                  ),
+                  SizedBox(width: 10),
+                  ChoiceChip(
+                    label: Text(widget.isArabic ? 'عليه (صرف)' : 'Payment (Out)', style: TextStyle(color: !isDebit ? Colors.black : Colors.white)),
+                    selected: !isDebit,
+                    selectedColor: Colors.redAccent,
+                    onSelected: (val) => setDialogState(() => isDebit = false),
+                  ),
+                ],
+              ),
+              TextField(controller: _amountController, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: widget.isArabic ? 'المبلغ' : 'Amount')),
+              TextField(controller: _noteController, decoration: InputDecoration(labelText: widget.isArabic ? 'البيان/التفاصيل' : 'Note/Details')),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: Text(widget.isArabic ? 'إلغاء' : 'Cancel')),
+            ElevatedButton(
+              onPressed: () {
+                double amt = double.tryParse(_amountController.text.trim()) ?? 0.0;
+                if (selectedAccount == null || amt <= 0) return;
+
+                setState(() {
+                  selectedAccount.entries.add(JournalEntry(
+                    amount: amt,
+                    isDebit: isDebit,
+                    note: _noteController.text.trim().isEmpty ? "سند سريع" : _noteController.text.trim(),
+                    date: "${DateTime.now().day}/${DateTime.now().month} ${DateTime.now().hour}:${DateTime.now().minute}",
+                  ));
+                });
+                widget.onUpdate();
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(widget.isArabic ? 'تم تسجيل السند وتأثر الحساب بنجاح!' : 'Voucher saved successfully!')));
+              },
+              child: Text(widget.isArabic ? 'تأكيد السند' : 'Confirm'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _quickStatementDialog() {
+    dynamic selectedAccount;
+    List<dynamic> allAccounts = [];
+    allAccounts.addAll(widget.customers);
+    allAccounts.addAll(widget.suppliers);
+    allAccounts.addAll(widget.employees);
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: Color(0xFF1C2541),
+          title: Text(widget.isArabic ? 'البحث عن كشف حساب ومشاركته' : 'Find & Export Statement'),
+          content: DropdownButton<dynamic>(
+            hint: Text(widget.isArabic ? 'اختر الاسم المستهدف' : 'Select Name'),
+            value: selectedAccount,
+            dropdownColor: Color(0xFF1C2541),
+            onChanged: (val) {
+              setDialogState(() => selectedAccount = val);
+            },
+            items: allAccounts.map<DropdownMenuItem<dynamic>>((acc) {
+              return DropdownMenuItem<dynamic>(
+                value: acc,
+                child: Text(acc.name),
+              );
+            }).toList(),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: Text(widget.isArabic ? 'إلغاء' : 'Cancel')),
+            ElevatedButton(
+              onPressed: () async {
+                if (selectedAccount == null) return;
+                Navigator.pop(context);
+                String statement = "==============================\n"
+                                   "🏢 ${widget.shopName}\n"
+                                   "📞 هاتف: ${widget.shopPhone}\n"
+                                   "==============================\n"
+                                   "كشف حساب العميل: ${selectedAccount.name}\n"
+                                   "التاريخ: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}\n"
+                                   "------------------------------\n";
+                if (selectedAccount is Employee) {
+                  statement += "الراتب الأساسي: ${selectedAccount.baseSalary} ر.ي\n"
+                               "المسحوبات: ${selectedAccount.totalPaid} ر.ي\n"
+                               "المتبقي له: ${selectedAccount.remainingSalary} ر.ي\n";
+                } else {
+                  statement += "الرصيد الإجمالي: ${selectedAccount.balance} ر.ي\n";
+                }
+                statement += "==============================\n"
+                             "تم التصدير بواسطة: المحاسب المالي Pro";
+
+                String url = "https://wa.me/?text=${Uri.encodeComponent(statement)}";
+                if (await canLaunchUrl(Uri.parse(url))) {
+                  await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+                }
+              },
+              child: Text(widget.isArabic ? 'مشاركة كشف الحساب' : 'Share Statement'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    bool isAr = widget.isArabic;
+    return Scaffold(
+      drawer: widget.buildDrawer(context),
+      appBar: AppBar(title: Text(isAr ? 'المحاسب المالي' : 'Smart Accountant'), centerTitle: true),
+      body: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(12.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              MarqueeBar(),
+              SizedBox(height: 10),
+              TextField(
+                decoration: InputDecoration(
+                  hintText: isAr ? 'البحث السريع عن أي حساب أو عملية...' : 'Quick search...',
+                  prefixIcon: Icon(Icons.search, color: Colors.tealAccent),
+                  filled: true,
+                  fillColor: Color(0xFF1C2541),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                ),
+                onChanged: (val) => setState(() => _globalSearchQuery = val),
+              ),
+              SizedBox(height: 15),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _buildQuickActionBtn(isAr ? 'سند جديد' : 'New Voucher', Icons.assignment, _addQuickVoucherDialog),
+                    _buildQuickActionBtn(isAr ? 'كشف حساب' : 'Statement', Icons.receipt_long, _quickStatementDialog),
+                    _buildQuickActionBtn(isAr ? 'قيد بسيط' : 'Simple Entry', Icons.compare_arrows, () {}),
+                    _buildQuickActionBtn(isAr ? 'الحركة اليومية' : 'Daily Journal', Icons.history, () {
+                      Navigator.push(context, MaterialPageRoute(builder: (context) => FinancialReportsPage(customers: widget.customers, suppliers: widget.suppliers, expenses: widget.expenses, profit: netProfit)));
+                    }),
+                    _buildQuickActionBtn(isAr ? 'فاتورة جديدة' : 'New Invoice', Icons.receipt, () {}),
+                    _buildQuickActionBtn(isAr ? 'صرف عملات' : 'Exchange Converter', Icons.currency_exchange, () {}),
+                  ],
+                ),
+              ),
+              SizedBox(height: 15),
+              _buildStatCard(isAr ? 'أرصدة ديون العملاء (لنا)' : 'Customer Debts (Owed to Us)', '$totalCustomersDebt YER', Colors.greenAccent, Icons.arrow_downward),
+              SizedBox(height: 10),
+              _buildStatCard(isAr ? 'مستحقات الموردين (علينا)' : 'Supplier Payables (We Owe)', '$totalSuppliersDebt YER', Colors.redAccent, Icons.arrow_upward),
+              SizedBox(height: 10),
+              _buildStatCard(isAr ? 'صافي الأرباح والخسائر التقديرية' : 'Estimated Net Profit/Loss', '$netProfit YER', netProfit >= 0 ? Colors.tealAccent : Colors.red, Icons.analytics),
+              SizedBox(height: 15),
+              if (widget.customModules.isNotEmpty) ...[
+                Text(isAr ? 'نوافذك المخصصة المضافة:' : 'Custom Modules:', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold)),
+                SizedBox(height: 5),
+                ...widget.customModules.map((modName) => Card(
+                  color: Color(0xFF1C2541),
+                  child: ListTile(
+                    leading: Icon(Icons.dashboard_customize, color: Colors.tealAccent),
+                    title: Text(modName, style: TextStyle(fontWeight: FontWeight.bold)),
+                    trailing: Icon(Icons.arrow_forward_ios, size: 14),
+                    onTap: () {},
+                  ),
+                )).toList(),
+                SizedBox(height: 10),
+              ],
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(backgroundColor: Color(0xFF1C2541), minimumSize: Size(double.infinity, 50)),
+                icon: Icon(Icons.add, color: Colors.amber),
+                label: Text(isAr ? 'إضافة نافذة جديدة مخصصة' : 'Add New Custom Window', style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
+                onPressed: widget.onAddModule,
+              )
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildQuickActionBtn(String label, IconData icon, VoidCallback action) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4.0),
+      child: ElevatedButton.icon(
+        style: ElevatedButton.styleFrom(backgroundColor: Color(0xFF1C2541), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
+        icon: Icon(icon, size: 16, color: Color(0xFF6FFFE9)),
+        label: Text(label, style: TextStyle(fontSize: 12, color: Colors.white)),
+        onPressed: action,
+      ),
+    );
+  }
+
+  Widget _buildStatCard(String title, String value, Color color, IconData icon) {
+    return Card(
+      color: Color(0xFF1C2541),
+      child: Padding(
+        padding: const EdgeInsets.all(15.0),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: TextStyle(color: Colors.white70, fontSize: 13)),
+                SizedBox(height: 5),
+                Text(value, style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.bold)),
+              ],
+            ),
+            Icon(icon, color: color, size: 30),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// كلاس التقارير المالية المتكاملة
+class FinancialReportsPage extends StatelessWidget {
+  final List<Account> customers;
+  final List<Account> suppliers;
+  final List<Expense> expenses;
+  final double profit;
+
+  FinancialReportsPage({required this.customers, required this.suppliers, required this.expenses, required this.profit});
+
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 3,
+      child: Scaffold(
+        backgroundColor: Color(0xFF0B132B),
+        appBar: AppBar(
+          title: Text('التقارير المالية ودفتر اليومية'),
+          bottom: TabBar(
+            indicatorColor: Color(0xFF6FFFE9),
+            tabs: [
+              Tab(text: 'حركة الصندوق'),
+              Tab(text: 'ميزان المراجعة'),
+              Tab(text: 'الأرباح والخسائر'),
+            ],
+          ),
+        ),
+        body: TabBarView(
+          children: [
+            _buildCashflowView(),
+            _buildTrialBalanceView(),
+            _buildProfitLossView(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCashflowView() {
+    List<String> logs = [];
+    double balance = 0.0;
+
+    for (var c in customers) {
+      for (var e in c.entries) {
+        if (e.isDebit) {
+          logs.add("قبض من العميل [${c.name}]: +${e.amount} ر.ي (${e.note})");
+          balance += e.amount;
+        } else {
+          logs.add("صرف للعميل [${c.name}]: -${e.amount} ر.ي (${e.note})");
+          balance -= e.amount;
+        }
+      }
+    }
+    for (var s in suppliers) {
+      for (var e in s.entries) {
+        if (e.isDebit) {
+          logs.add("قبض من المورد [${s.name}]: +${e.amount} ر.ي (${e.note})");
+          balance += e.amount;
+        } else {
+          logs.add("دفع للمورد [${s.name}]: -${e.amount} ر.ي (${e.note})");
+          balance -= e.amount;
+        }
+      }
+    }
+    for (var exp in expenses) {
+      logs.add("مصروف عمومي [${exp.category}]: -${exp.amount} ر.ي (${exp.note})");
+      balance -= exp.amount;
+    }
+
+    return Column(
+      children: [
+        Container(
+          padding: EdgeInsets.all(15),
+          color: Color(0xFF1C2541),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('الرصيد الفعلي الحالي في الصندوق:', style: TextStyle(fontWeight: FontWeight.bold)),
+              Text('$balance ر.ي', style: TextStyle(color: balance >= 0 ? Colors.greenAccent : Colors.red, fontWeight: FontWeight.bold, fontSize: 16)),
+            ],
+          ),
+        ),
+        Expanded(
+          child: logs.isEmpty
+              ? Center(child: Text('لا توجد حركات مالية مسجلة في الصندوق.'))
+              : ListView.builder(
+                  itemCount: logs.length,
+                  itemBuilder: (context, index) => ListTile(
+                    leading: Icon(logs[index].contains('+') ? Icons.add_circle : Icons.remove_circle, color: logs[index].contains('+') ? Colors.green : Colors.red),
+                    title: Text(logs[index], style: TextStyle(fontSize: 13)),
+                  ),
+                ),
+        )
+      ],
+    );
+  }
+
+  Widget _buildTrialBalanceView() {
+    double totalDebit = 0.0;
+    double totalCredit = 0.0;
+
+    for (var c in customers) {
+      if (c.balance < 0) totalDebit += c.balance.abs();
+      if (c.balance > 0) totalCredit += c.balance;
+    }
+    for (var s in suppliers) {
+      if (s.balance < 0) totalDebit += s.balance.abs();
+      if (s.balance > 0) totalCredit += s.balance;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.all(20.0),
+      child: Column(
+        children: [
+          Text('ميزان المراجعة العام للحسابات', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
+          SizedBox(height: 30),
+          _buildBalanceRow('إجمالي أرصدة المدين (المطالبات/الديون لنا)', '$totalDebit ر.ي', Colors.greenAccent),
+          Divider(color: Colors.white24),
+          _buildBalanceRow('إجمالي أرصدة الدائن (المستحقات للناس)', '$totalCredit ر.ي', Colors.redAccent),
+          Divider(color: Colors.white24),
+          SizedBox(height: 20),
+          Text(
+            totalDebit == totalCredit ? "ميزان الحسابات متوازن تماماً" : "توجد فروقات أرصدة معلقة بقيمة ${(totalDebit - totalCredit).abs()} ر.ي",
+            style: TextStyle(color: totalDebit == totalCredit ? Colors.tealAccent : Colors.orangeAccent, fontWeight: FontWeight.bold),
+          )
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBalanceRow(String label, String val, Color col) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: TextStyle(fontSize: 14)),
+          Text(val, style: TextStyle(color: col, fontWeight: FontWeight.bold, fontSize: 16)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProfitLossView() {
+    return Padding(
+      padding: const EdgeInsets.all(20.0),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.pie_chart, size: 80, color: profit >= 0 ? Colors.tealAccent : Colors.red),
+          SizedBox(height: 20),
+          Text('ملخص الأرباح والخسائر التشغيلية:', style: TextStyle(fontSize: 16)),
+          SizedBox(height: 10),
+          Text('$profit ر.ي', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: profit >= 0 ? Colors.tealAccent : Colors.red)),
+          SizedBox(height: 20),
+          Text(
+            profit >= 0 ? "أداء مالي إيجابي - مبيعاتك تتجاوز نفقاتك العامة." : "تنبيه: نفقاتك ومصروفاتك تتجاوز إيراداتك الحالية.",
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white54, fontSize: 13),
+          )
+        ],
+      ),
+    );
+  }
+}
+
+// 2. واجهة العملاء (Customers)
+class CustomersView extends StatefulWidget {
+  final List<Account> customers;
+  final VoidCallback onUpdate;
+  final bool Function() checkAccess;
+  final Widget Function(BuildContext) buildDrawer;
+  final bool isArabic;
+  final String shopName;
+  final String shopPhone;
+
+  CustomersView({required this.customers, required this.onUpdate, required this.checkAccess, required this.buildDrawer, required this.isArabic, required this.shopName, required this.shopPhone});
+
+  @override
+  _CustomersViewState createState() => _CustomersViewState();
+}
+
+class _CustomersViewState extends State<CustomersView> {
+  final TextEditingController _nameController = TextEditingController();
+  final TextEditingController _phoneController = TextEditingController();
+  String _searchQuery = "";
+
+  @override
+  Widget build(BuildContext context) {
+    var filteredList = widget.customers.where((c) => c.name.contains(_searchQuery)).toList();
+    bool isAr = widget.isArabic;
+
+    return Scaffold(
+      drawer: widget.buildDrawer(context),
+      appBar: AppBar(title: Text(isAr ? 'إدارة العملاء والمدينين' : 'Customer Management')),
+      floatingActionButton: FloatingActionButton(
+        backgroundColor: Colors.teal,
+        child: Icon(Icons.person_add),
+        onPressed: () {
+          if (!widget.checkAccess()) return;
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              backgroundColor: Color(0xFF1E293B),
+              title: Text(isAr ? 'إضافة عميل جديد' : 'Add New Customer'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(controller: _nameController, decoration: InputDecoration(labelText: isAr ? 'الاسم' : 'Name')),
+                  TextField(controller: _phoneController, decoration: InputDecoration(labelText: isAr ? 'رقم الهاتف' : 'Phone')),
+                ],
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context), child: Text(isAr ? 'إلغاء' : 'Cancel')),
+                ElevatedButton(
+                  onPressed: () {
+                    if (_nameController.text.trim().isEmpty) return;
+                    setState(() {
+                      widget.customers.add(Account(name: _nameController.text.trim(), phone: _phoneController.text.trim()));
+                    });
+                    _nameController.clear();
+                    _phoneController.clear();
+                    widget.onUpdate();
+                    Navigator.pop(context);
+                  },
+                  child: Text(isAr ? 'حفظ' : 'Save'),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(10.0),
+            child: TextField(
+              decoration: InputDecoration(
+                hintText: isAr ? 'البحث السريع عن عميل...' : 'Quick search...',
+                prefixIcon: Icon(Icons.search, color: Colors.tealAccent),
+                filled: true,
+                fillColor: Color(0xFF1C2541),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+              ),
+              onChanged: (val) => setState(() => _searchQuery = val),
+            ),
+          ),
+          Expanded(
+            child: filteredList.isEmpty
+                ? Center(child: Text(isAr ? 'لا يوجد نتائج مطابقة للبحث.' : 'No matches found.'))
+                : ListView.builder(
+                    itemCount: filteredList.length,
+                    itemBuilder: (context, index) {
+                      var customer = filteredList[index];
+                      return Card(
+                        color: Color(0xFF1C2541),
+                        margin: EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                        child: ListTile(
+                          title: Text(customer.name, style: TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text(isAr ? 'رقم الهاتف: ${customer.phone}' : 'Phone: ${customer.phone}'),
+                          trailing: Text(
+                            customer.balance == 0 ? (isAr ? 'متوازن' : 'Balanced') : (customer.balance > 0 ? (isAr ? 'له: ${customer.balance}' : 'Credit: ${customer.balance}') : (isAr ? 'عليه: ${customer.balance.abs()}' : 'Debit: ${customer.balance.abs()}')),
+                            style: TextStyle(color: customer.balance == 0 ? Colors.white : (customer.balance > 0 ? Colors.greenAccent : Colors.redAccent), fontWeight: FontWeight.bold),
+                          ),
+                          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => AccountDetailsPage(account: customer, isSupplier: false, onUpdate: widget.onUpdate, checkAccess: widget.checkAccess, shopName: widget.shopName, shopPhone: widget.shopPhone))),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// 3. واجهة الموردين (Suppliers)
+class SuppliersView extends StatefulWidget {
+  final List<Account> suppliers;
+  final VoidCallback onUpdate;
+  final bool Function() checkAccess;
+  final Widget Function(BuildContext) buildDrawer;
+  final bool isArabic;
+  final String shopName;
+  final String shopPhone;
+
+  SuppliersView({required this.suppliers, required this.onUpdate, required this.checkAccess, required this.buildDrawer, required this.isArabic, required this.shopName, required this.shopPhone});
+
+  @override
+  _SuppliersViewState createState() => _SuppliersViewState();
+}
+
+class _SuppliersViewState extends State<SuppliersView> {
+  final TextEditingController _nameController = TextEditingController();
+  final TextEditingController _phoneController = TextEditingController();
+  String _searchQuery = "";
+
+  @override
+  Widget build(BuildContext context) {
+    var filteredList = widget.suppliers.where((s) => s.name.contains(_searchQuery)).toList();
+    bool isAr = widget.isArabic;
+
+    return Scaffold(
+      drawer: widget.buildDrawer(context),
+      appBar: AppBar(title: Text(isAr ? 'إدارة الموردين والخصوم' : 'Supplier Management')),
+      floatingActionButton: FloatingActionButton(
+        backgroundColor: Colors.teal,
+        child: Icon(Icons.local_shipping),
+        onPressed: () {
+          if (!widget.checkAccess()) return;
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              backgroundColor: Color(0xFF1E293B),
+              title: Text(isAr ? 'إضافة مورد جديد' : 'Add New Supplier'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(controller: _nameController, decoration: InputDecoration(labelText: isAr ? 'الاسم' : 'Name')),
+                  TextField(controller: _phoneController, decoration: InputDecoration(labelText: isAr ? 'رقم الهاتف' : 'Phone')),
+                ],
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context), child: Text(isAr ? 'إلغاء' : 'Cancel')),
+                ElevatedButton(
+                  onPressed: () {
+                    if (_nameController.text.trim().isEmpty) return;
+                    setState(() {
+                      widget.suppliers.add(Account(name: _nameController.text.trim(), phone: _phoneController.text.trim()));
+                    });
+                    _nameController.clear();
+                    _phoneController.clear();
+                    widget.onUpdate();
+                    Navigator.pop(context);
+                  },
+                  child: Text(isAr ? 'حفظ' : 'Save'),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(10.0),
+            child: TextField(
+              decoration: InputDecoration(
+                hintText: isAr ? 'البحث السريع عن مورد...' : 'Quick search...',
+                prefixIcon: Icon(Icons.search, color: Colors.tealAccent),
+                filled: true,
+                fillColor: Color(0xFF1C2541),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+              ),
+              onChanged: (val) => setState(() => _searchQuery = val),
+            ),
+          ),
+          Expanded(
+            child: filteredList.isEmpty
+                ? Center(child: Text(isAr ? 'لا يوجد نتائج مطابقة للبحث.' : 'No matches found.'))
+                : ListView.builder(
+                    itemCount: filteredList.length,
+                    itemBuilder: (context, index) {
+                      var supplier = filteredList[index];
+                      return Card(
+                        color: Color(0xFF1C2541),
+                        margin: EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                        child: ListTile(
+                          title: Text(supplier.name, style: TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text(isAr ? 'رقم الهاتف: ${supplier.phone}' : 'Phone: ${supplier.phone}'),
+                          trailing: Text(
+                            supplier.balance == 0 ? (isAr ? 'متوازن' : 'Balanced') : (supplier.balance > 0 ? (isAr ? 'له: ${supplier.balance}' : 'Credit: ${supplier.balance}') : (isAr ? 'عليه: ${supplier.balance.abs()}' : 'Debit: ${supplier.balance.abs()}')),
+                            style: TextStyle(color: supplier.balance == 0 ? Colors.white : (supplier.balance > 0 ? Colors.greenAccent : Colors.redAccent), fontWeight: FontWeight.bold),
+                          ),
+                          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => AccountDetailsPage(account: supplier, isSupplier: true, onUpdate: widget.onUpdate, checkAccess: widget.checkAccess, shopName: widget.shopName, shopPhone: widget.shopPhone))),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// 4. واجهة الموظفين (Employees)
+class EmployeesView extends StatefulWidget {
+  final List<Employee> employees;
+  final VoidCallback onUpdate;
+  final bool Function() checkAccess;
+  final Widget Function(BuildContext) buildDrawer;
+  final bool isArabic;
+
+  EmployeesView({required this.employees, required this.onUpdate, required this.checkAccess, required this.buildDrawer, required this.isArabic});
+
+  @override
+  _EmployeesViewState createState() => _EmployeesViewState();
+}
+
+class _EmployeesViewState extends State<EmployeesView> {
+  final TextEditingController _nameController = TextEditingController();
+  final TextEditingController _phoneController = TextEditingController();
+  final TextEditingController _salaryController = TextEditingController();
+  String _searchQuery = "";
+
+  @override
+  Widget build(BuildContext context) {
+    var filteredList = widget.employees.where((e) => e.name.contains(_searchQuery)).toList();
+    bool isAr = widget.isArabic;
+
+    return Scaffold(
+      drawer: widget.buildDrawer(context),
+      appBar: AppBar(title: Text(isAr ? 'إدارة شؤون الموظفين والرواتب' : 'Employee & Salary Management')),
+      floatingActionButton: FloatingActionButton(
+        backgroundColor: Colors.teal,
+        child: Icon(Icons.badge),
+        onPressed: () {
+          if (!widget.checkAccess()) return;
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              backgroundColor: Color(0xFF1E293B),
+              title: Text(isAr ? 'إضافة موظف جديد لدفتر الرواتب' : 'Add New Employee'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(controller: _nameController, decoration: InputDecoration(labelText: isAr ? 'الاسم الكامل' : 'Full Name')),
+                  TextField(controller: _phoneController, decoration: InputDecoration(labelText: isAr ? 'رقم الهاتف' : 'Phone')),
+                  TextField(controller: _salaryController, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: isAr ? 'الراتب التعاقدي ر.ي' : 'Base Salary')),
+                ],
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context), child: Text(isAr ? 'إلغاء' : 'Cancel')),
+                ElevatedButton(
+                  onPressed: () {
+                    if (_nameController.text.trim().isEmpty) return;
+                    double sal = double.tryParse(_salaryController.text.trim()) ?? 0.0;
+                    setState(() {
+                      widget.employees.add(Employee(name: _nameController.text.trim(), phone: _phoneController.text.trim(), baseSalary: sal));
+                    });
+                    _nameController.clear();
+                    _phoneController.clear();
+                    _salaryController.clear();
+                    widget.onUpdate();
+                    Navigator.pop(context);
+                  },
+                  child: Text(isAr ? 'حفظ البيانات' : 'Save'),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(10.0),
+            child: TextField(
+              decoration: InputDecoration(
+                hintText: isAr ? 'البحث السريع عن موظف...' : 'Quick search...',
+                prefixIcon: Icon(Icons.search, color: Colors.tealAccent),
+                filled: true,
+                fillColor: Color(0xFF1C2541),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+              ),
+              onChanged: (val) => setState(() => _searchQuery = val),
+            ),
+          ),
+          Expanded(
+            child: filteredList.isEmpty
+                ? Center(child: Text(isAr ? 'لا يوجد موظفين مسجلين حالياً.' : 'No employees registered.'))
+                : ListView.builder(
+                    itemCount: filteredList.length,
+                    itemBuilder: (context, index) {
+                      var emp = filteredList[index];
+                      return Card(
+                        color: Color(0xFF1C2541),
+                        margin: EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                        child: ListTile(
+                          title: Text(emp.name, style: TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text(isAr ? 'الراتب: ${emp.baseSalary} | المسحوبات: ${emp.totalPaid}' : 'Salary: ${emp.baseSalary} | Paid: ${emp.totalPaid}'),
+                          trailing: Text(
+                            isAr ? 'المتبقي: ${emp.remainingSalary}' : 'Remaining: ${emp.remainingSalary}',
+                            style: TextStyle(color: emp.remainingSalary >= 0 ? Colors.greenAccent : Colors.red, fontWeight: FontWeight.bold),
+                          ),
+                          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => EmployeeDetailsPage(employee: emp, onUpdate: widget.onUpdate, checkAccess: widget.checkAccess))),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// 5. واجهة المخازن والمستودعات
+class InventoryView extends StatefulWidget {
+  final List<Warehouse> warehouses;
+  final VoidCallback onUpdate;
+  final bool Function() checkAccess;
+  final Widget Function(BuildContext) buildDrawer;
+  final bool isArabic;
+
+  InventoryView({required this.warehouses, required this.onUpdate, required this.checkAccess, required this.buildDrawer, required this.isArabic});
+
+  @override
+  _InventoryViewState createState() => _InventoryViewState();
+}
+
+class _InventoryViewState extends State<InventoryView> {
+  final TextEditingController _warehouseController = TextEditingController();
+  String _searchQuery = "";
+
+  void _addWarehouse() {
+    if (!widget.checkAccess()) return;
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF1E293B),
+        title: Text(widget.isArabic ? 'إضافة مستودع / مخزن جديد' : 'Add New Warehouse'),
+        content: TextField(controller: _warehouseController, decoration: InputDecoration(labelText: widget.isArabic ? 'اسم المخزن' : 'Warehouse Name')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text(widget.isArabic ? 'إلغاء' : 'Cancel')),
+          ElevatedButton(
+            onPressed: () {
+              if (_warehouseController.text.trim().isEmpty) return;
+              setState(() {
+                widget.warehouses.add(Warehouse(name: _warehouseController.text.trim()));
+              });
+              _warehouseController.clear();
+              widget.onUpdate();
+              Navigator.pop(context);
+            },
+            child: Text(widget.isArabic ? 'حفظ' : 'Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    var filteredList = widget.warehouses.where((w) => w.name.contains(_searchQuery)).toList();
+    bool isAr = widget.isArabic;
+
+    return Scaffold(
+      drawer: widget.buildDrawer(context),
+      appBar: AppBar(title: Text(isAr ? 'إدارة المخازن والمستودعات' : 'Warehouse Management')),
+      floatingActionButton: FloatingActionButton(backgroundColor: Colors.amber[800], child: Icon(Icons.store), onPressed: _addWarehouse),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(10.0),
+            child: TextField(
+              decoration: InputDecoration(
+                hintText: isAr ? 'البحث السريع عن مخزن...' : 'Quick search...',
+                prefixIcon: Icon(Icons.search, color: Colors.amberAccent),
+                filled: true,
+                fillColor: Color(0xFF1C2541),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+              ),
+              onChanged: (val) => setState(() => _searchQuery = val),
+            ),
+          ),
+          Expanded(
+            child: filteredList.isEmpty
+                ? Center(child: Text(isAr ? 'لا توجد مخازن مضافة بعد.' : 'No warehouses added yet.'))
+                : ListView.builder(
+                    itemCount: filteredList.length,
+                    itemBuilder: (context, index) {
+                      var wh = filteredList[index];
+                      return Card(
+                        color: Color(0xFF1C2541),
+                        margin: EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                        child: ListTile(
+                          leading: Icon(Icons.warehouse, color: Colors.amber),
+                          title: Text(wh.name, style: TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text(isAr ? 'عدد الأصناف: ${wh.items.length} صنف' : 'Items: ${wh.items.length}'),
+                          trailing: Icon(Icons.arrow_forward_ios, color: Colors.white24, size: 16),
+                          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => WarehouseDetailsPage(warehouse: wh, onUpdate: widget.onUpdate, checkAccess: widget.checkAccess, isArabic: isAr))),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// صفحة الأصناف والعمليات بداخل المخزن المحدد (التوريد والصرف)
+class WarehouseDetailsPage extends StatefulWidget {
+  final Warehouse warehouse;
+  final VoidCallback onUpdate;
+  final bool Function() checkAccess;
+  final bool isArabic;
+
+  WarehouseDetailsPage({required this.warehouse, required this.onUpdate, required this.checkAccess, required this.isArabic});
+
+  @override
+  _WarehouseDetailsPageState createState() => _WarehouseDetailsPageState();
+}
+
+class _WarehouseDetailsPageState extends State<WarehouseDetailsPage> {
+  final TextEditingController _itemNameController = TextEditingController();
+  final TextEditingController _itemQtyController = TextEditingController();
+  final TextEditingController _itemBuyPriceController = TextEditingController();
+  final TextEditingController _itemSellPriceController = TextEditingController();
+  final TextEditingController _majorUnitController = TextEditingController(text: 'كرتون');
+  final TextEditingController _minorUnitController = TextEditingController(text: 'علبة');
+  final TextEditingController _conversionController = TextEditingController(text: '24');
+
+  void _addItem() {
+    if (!widget.checkAccess()) return;
+    bool isAr = widget.isArabic;
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF1C2541),
+        title: Text(isAr ? 'إضافة صنف جديد للمخزن' : 'Add New Item'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: _itemNameController, decoration: InputDecoration(labelText: isAr ? 'اسم الصنف/المادة' : 'Item Name')),
+              TextField(controller: _majorUnitController, decoration: InputDecoration(labelText: isAr ? 'الوحدة الكبرى (كرتون)' : 'Major Unit (Box)')),
+              TextField(controller: _minorUnitController, decoration: InputDecoration(labelText: isAr ? 'الوحدة الصغرى (علبة)' : 'Minor Unit (Piece)')),
+              TextField(controller: _conversionController, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: isAr ? 'معدل التحويل (علبة في الكرتون)' : 'Conversion Rate')),
+              TextField(controller: _itemQtyController, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: isAr ? 'الكمية الافتتاحية' : 'Initial Qty')),
+              TextField(controller: _itemBuyPriceController, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: isAr ? 'سعر الشراء ر.ي' : 'Buy Price')),
+              TextField(controller: _itemSellPriceController, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: isAr ? 'سعر البيع ر.ي' : 'Sell Price')),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text(isAr ? 'إلغاء' : 'Cancel')),
+          ElevatedButton(
+            onPressed: () {
+              if (_itemNameController.text.trim().isEmpty) return;
+              int qty = int.tryParse(_itemQtyController.text.trim()) ?? 0;
+              int conv = int.tryParse(_conversionController.text.trim()) ?? 12;
+              double buy = double.tryParse(_itemBuyPriceController.text.trim()) ?? 0.0;
+              double sell = double.tryParse(_itemSellPriceController.text.trim()) ?? 0.0;
+
+              setState(() {
+                widget.warehouse.items.add(InventoryItem(
+                  name: _itemNameController.text.trim(),
+                  qtyInSubUnits: qty,
+                  majorUnitName: _majorUnitController.text.trim(),
+                  minorUnitName: _minorUnitController.text.trim(),
+                  conversionRate: conv,
+                  buyPriceMajor: buy,
+                  sellPriceMajor: sell,
+                ));
+              });
+
+              _itemNameController.clear();
+              _itemQtyController.clear();
+              _itemBuyPriceController.clear();
+              _itemSellPriceController.clear();
+              widget.onUpdate();
+              Navigator.pop(context);
+            },
+            child: Text(isAr ? 'إضافة صنف' : 'Add Item'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _addStockTransaction(InventoryItem item, bool isStockIn) {
+    final TextEditingController _qtyController = TextEditingController();
+    bool useMajorUnit = true;
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: Color(0xFF1C2541),
+          title: Text(isStockIn ? (widget.isArabic ? 'عملية توريد' : 'Stock In') : (widget.isArabic ? 'عملية صرف' : 'Stock Out'), style: TextStyle(color: isStockIn ? Colors.green : Colors.red)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  ChoiceChip(
+                    label: Text(item.majorUnitName),
+                    selected: useMajorUnit,
+                    onSelected: (val) => setDialogState(() => useMajorUnit = true),
+                  ),
+                  SizedBox(width: 10),
+                  ChoiceChip(
+                    label: Text(item.minorUnitName),
+                    selected: !useMajorUnit,
+                    onSelected: (val) => setDialogState(() => useMajorUnit = false),
+                  ),
+                ],
+              ),
+              TextField(controller: _qtyController, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: widget.isArabic ? 'الكمية المطلوبة' : 'Quantity')),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: Text(widget.isArabic ? 'إلغاء' : 'Cancel')),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: isStockIn ? Colors.green : Colors.red),
+              onPressed: () {
+                int inputQty = int.tryParse(_qtyController.text.trim()) ?? 0;
+                if (inputQty <= 0) return;
+
+                int actualSubUnits = useMajorUnit ? (inputQty * item.conversionRate) : inputQty;
+
+                setState(() {
+                  if (isStockIn) {
+                    item.qtyInSubUnits += actualSubUnits;
+                    item.logs.add("توريد: +$inputQty ${useMajorUnit ? item.majorUnitName : item.minorUnitName} بتاريخ ${DateTime.now().day}/${DateTime.now().month}");
+                  } else {
+                    if (item.qtyInSubUnits < actualSubUnits) {
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('المخزون المتوفر غير كافٍ!')));
+                      return;
+                    }
+                    item.qtyInSubUnits -= actualSubUnits;
+                    item.logs.add("صرف: -$inputQty ${useMajorUnit ? item.majorUnitName : item.minorUnitName} بتاريخ ${DateTime.now().day}/${DateTime.now().month}");
+                  }
+                });
+                widget.onUpdate();
+                Navigator.pop(context);
+              },
+              child: Text(widget.isArabic ? 'تأكيد' : 'Confirm'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    bool isAr = widget.isArabic;
+    return Scaffold(
+      backgroundColor: Color(0xFF0B132B),
+      appBar: AppBar(title: Text('مخزن: ${widget.warehouse.name}')),
+      floatingActionButton: FloatingActionButton(backgroundColor: Colors.amber[800], child: Icon(Icons.add_shopping_cart), onPressed: _addItem),
+      body: widget.warehouse.items.isEmpty
+          ? Center(child: Text(isAr ? 'لا توجد أصناف في هذا المخزن بعد.' : 'No items in this warehouse.'))
+          : ListView.builder(
+              itemCount: widget.warehouse.items.length,
+              itemBuilder: (context, index) {
+                var item = widget.warehouse.items[index];
+                double majorPart = item.qtyInSubUnits / item.conversionRate;
+                int wholeMajor = majorPart.floor();
+                int remainingMinor = item.qtyInSubUnits % item.conversionRate;
+
+                return Card(
+                  color: Color(0xFF1C2541),
+                  margin: EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  child: ListTile(
+                    title: Text(item.name, style: TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Text('الشراء: ${item.buyPriceMajor} ر.ي | البيع: ${item.sellPriceMajor} ر.ي\nالحركة: ${item.logs.isEmpty ? "لا يوجد حركة" : item.logs.last}'),
+                    trailing: Container(
+                      padding: EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                      decoration: BoxDecoration(color: item.qtyInSubUnits > (item.conversionRate * 2) ? Colors.teal[900] : Colors.red[900], borderRadius: BorderRadius.circular(10)),
+                      child: Text(
+                        'المخزون: $wholeMajor ${item.majorUnitName} و $remainingMinor ${item.minorUnitName}',
+                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11),
+                      ),
+                    ),
+                    onTap: () {
+                      showModalBottomSheet(
+                        backgroundColor: Color(0xFF1C2541),
+                        context: context,
+                        builder: (context) => Container(
+                          padding: EdgeInsets.all(15),
+                          height: 180,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Text('تعديل مخزون الصنف: ${item.name}', textAlign: TextAlign.center, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                              Spacer(),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: ElevatedButton.icon(
+                                      style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                                      icon: Icon(Icons.add),
+                                      label: Text('توريد مخزني'),
+                                      onPressed: () {
+                                        Navigator.pop(context);
+                                        _addStockTransaction(item, true);
+                                      },
+                                    ),
+                                  ),
+                                  SizedBox(width: 10),
+                                  Expanded(
+                                    child: ElevatedButton.icon(
+                                      style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                                      icon: Icon(Icons.remove),
+                                      label: Text('صرف مخزني'),
+                                      onPressed: () {
+                                        Navigator.pop(context);
+                                        _addStockTransaction(item, false);
+                                      },
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              SizedBox(height: 10),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                );
+              },
+            ),
+    );
+  }
+}
+
+// الصفحة التفصيلية للعميل/المورد (كشف الحساب والعمليات والإشعارات والدمج)
+class AccountDetailsPage extends StatefulWidget {
+  final Account account;
+  final bool isSupplier;
+  final VoidCallback onUpdate;
+  final bool Function() checkAccess;
+  final String shopName;
+  final String shopPhone;
+
+  AccountDetailsPage({required this.account, required this.isSupplier, required this.onUpdate, required this.checkAccess, required this.shopName, required this.shopPhone});
+
+  @override
+  _AccountDetailsPageState createState() => _AccountDetailsPageState();
+}
+
+class _AccountDetailsPageState extends State<AccountDetailsPage> {
+  final TextEditingController _amountController = TextEditingController();
+  final TextEditingController _noteController = TextEditingController();
+
+  void _addEntry(bool isDebit) {
+    if (!widget.checkAccess()) return;
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF1C2541),
+        title: Text(isDebit ? 'إضافة مبلغ (له / دائن)' : 'إضافة مبلغ (عليه / مدين)', style: TextStyle(color: isDebit ? Colors.greenAccent : Colors.redAccent)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: _amountController, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: 'المبلغ ر.ي')),
+            TextField(controller: _noteController, decoration: InputDecoration(labelText: 'البيان/الملاحظة')),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text('إلغاء')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: isDebit ? Colors.green : Colors.red),
+            onPressed: () {
+              double amt = double.tryParse(_amountController.text.trim()) ?? 0.0;
+              if (amt <= 0) return;
+              setState(() {
+                widget.account.entries.add(JournalEntry(
+                  amount: amt,
+                  isDebit: isDebit,
+                  note: _noteController.text.trim().isEmpty ? "بدون بيان" : _noteController.text.trim(),
+                  date: "${DateTime.now().day}/${DateTime.now().month} ${DateTime.now().hour}:${DateTime.now().minute}",
+                ));
+              });
+              _amountController.clear();
+              _noteController.clear();
+              widget.onUpdate();
+              Navigator.pop(context);
+            },
+            child: Text('إضافة'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _sendNotification(bool isWhatsApp) async {
+    double absBalance = widget.account.balance.abs();
+    String customMessage = "السلام عليكم أخي ${widget.account.name}، نود تذكيركم بأن الرصيد المتبقي المستحق لحسابكم لدينا هو ($absBalance ر.ي). شكراً لتعاملكم الدائم معنا.";
+    TextEditingController _msgController = TextEditingController(text: customMessage);
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF1C2541),
+        title: Text('مراجعة وتعديل نص التذكير', style: TextStyle(color: Color(0xFF6FFFE9))),
+        content: TextField(
+          controller: _msgController,
+          maxLines: 4,
+          style: TextStyle(color: Colors.white),
+          decoration: InputDecoration(
+            enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+            focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: Color(0xFF6FFFE9))),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text('إلغاء')),
+          ElevatedButton(
+            onPressed: () async {
+              String finalMsg = _msgController.text.trim();
+              String phone = widget.account.phone.replaceAll('+', '').replaceAll(' ', '');
+              if (!phone.startsWith('967') && phone.length == 9) phone = '967$phone';
+
+              String url = isWhatsApp 
+                  ? "https://wa.me/$phone?text=${Uri.encodeComponent(finalMsg)}"
+                  : "sms:${widget.account.phone}?body=${Uri.encodeComponent(finalMsg)}";
+
+              Navigator.pop(context);
+              if (await canLaunchUrl(Uri.parse(url))) {
+                await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+              }
+            },
+            child: Text('إرسال الآن'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _shareStatementText() async {
+    String statement = "==============================\n"
+                       "🏢 ${widget.shopName}\n"
+                       "📞 هاتف: ${widget.shopPhone}\n"
+                       "==============================\n"
+                       "كشف حساب: ${widget.account.name}\n"
+                       "التاريخ: ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}\n"
+                       "==============================\n"
+                       "العمليات المسجلة:\n";
+    for (var entry in widget.account.entries) {
+      statement += "- ${entry.date} | ${entry.isDebit ? 'له' : 'عليه'}: ${entry.amount} ر.ي (${entry.note})\n";
+    }
+    statement += "------------------------------\n"
+                 "الرصيد الإجمالي: ${widget.account.balance} ر.ي\n"
+                 "==============================\n"
+                 "تم توليده بواسطة: المحاسب المالي Pro";
+
+    String url = "https://wa.me/?text=${Uri.encodeComponent(statement)}";
+    if (await canLaunchUrl(Uri.parse(url))) {
+      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Color(0xFF0B132B),
+      appBar: AppBar(
+        title: Text(widget.account.name),
+        actions: [
+          IconButton(icon: Icon(Icons.share, color: Colors.tealAccent), onPressed: _shareStatementText),
+        ],
+      ),
+      body: Column(
+        children: [
+          Container(
+            padding: EdgeInsets.all(15),
+            color: Color(0xFF1C2541),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('صافي الرصيد الحالي:', style: TextStyle(fontSize: 16)),
+                Text(
+                  widget.account.balance == 0 ? 'متوازن' : (widget.account.balance > 0 ? 'له: ${widget.account.balance}' : 'عليه: ${widget.account.balance.abs()}'),
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: widget.account.balance == 0 ? Colors.white : (widget.account.balance > 0 ? Colors.greenAccent : Colors.redAccent)),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: widget.account.entries.isEmpty
+                ? Center(child: Text('لا توجد عمليات مضافة حتى الآن.'))
+                : ListView.builder(
+                    itemCount: widget.account.entries.length,
+                    itemBuilder: (context, index) {
+                      var entry = widget.account.entries[index];
+                      return Card(
+                        color: Color(0xFF1C2541),
+                        margin: EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        child: ListTile(
+                          leading: Icon(entry.isDebit ? Icons.arrow_downward : Icons.arrow_upward, color: entry.isDebit ? Colors.greenAccent : Colors.redAccent),
+                          title: Text('مبلغ: ${entry.amount} ر.ي', style: TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text('البيان: ${entry.note}\nالتاريخ: ${entry.date}'),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          Container(
+            padding: EdgeInsets.all(15),
+            color: Color(0xFF1C2541),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.green), onPressed: () => _addEntry(true), child: Text('له (قبض/دفع)', style: TextStyle(fontWeight: FontWeight.bold)))),
+                    SizedBox(width: 10),
+                    Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red), onPressed: () => _addEntry(false), child: Text('عليه (صرف)', style: TextStyle(fontWeight: FontWeight.bold)))),
+                  ],
+                ),
+                SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(child: OutlinedButton.icon(style: OutlinedButton.styleFrom(foregroundColor: Colors.greenAccent, side: BorderSide(color: Colors.greenAccent)), icon: Icon(Icons.chat), label: Text('تذكير واتساب'), onPressed: () => _sendNotification(true))),
+                    SizedBox(width: 10),
+                    Expanded(child: OutlinedButton.icon(style: OutlinedButton.styleFrom(foregroundColor: Colors.tealAccent, side: BorderSide(color: Colors.tealAccent)), icon: Icon(Icons.sms), label: Text('تذكير SMS'), onPressed: () => _sendNotification(false))),
+                  ],
+                )
+              ],
+            ),
+          )
+        ],
+      ),
+    );
+  }
+}
+
+// كشف السحبيات والرواتب للموظف
+class EmployeeDetailsPage extends StatefulWidget {
+  final Employee employee;
+  final VoidCallback onUpdate;
+  final bool Function() checkAccess;
+
+  EmployeeDetailsPage({required this.employee, required this.onUpdate, required this.checkAccess});
+
+  @override
+  _EmployeeDetailsPageState createState() => _EmployeeDetailsPageState();
+}
+
+class _EmployeeDetailsPageState extends State<EmployeeDetailsPage> {
+  final TextEditingController _amountController = TextEditingController();
+  final TextEditingController _noteController = TextEditingController();
+
+  void _addEntry(bool isDebit) {
+    if (!widget.checkAccess()) return;
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF1C2541),
+        title: Text(isDebit ? 'صرف مستحق (راتب/مكافأة)' : 'سجل سحبية جديدة (سلفة/عهدة)', style: TextStyle(color: isDebit ? Colors.greenAccent : Colors.redAccent)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: _amountController, keyboardType: TextInputType.number, decoration: InputDecoration(labelText: 'المبلغ ر.ي')),
+            TextField(controller: _noteController, decoration: InputDecoration(labelText: 'البيان/السبب')),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: Text('إلغاء')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: isDebit ? Colors.green : Colors.red),
+            onPressed: () {
+              double amt = double.tryParse(_amountController.text.trim()) ?? 0.0;
+              if (amt <= 0) return;
+              setState(() {
+                widget.employee.entries.add(JournalEntry(
+                  amount: amt,
+                  isDebit: isDebit,
+                  note: _noteController.text.trim().isEmpty ? (isDebit ? "استحقاق راتب" : "سلفة راتب") : _noteController.text.trim(),
+                  date: "${DateTime.now().day}/${DateTime.now().month}",
+                ));
+              });
+              _amountController.clear();
+              _noteController.clear();
+              widget.onUpdate();
+              Navigator.pop(context);
+            },
+            child: Text('تأكيد'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Color(0xFF0B132B),
+      appBar: AppBar(title: Text('سجل الموظف: ${widget.employee.name}')),
+      body: Column(
+        children: [
+          Container(
+            padding: EdgeInsets.all(15),
+            color: Color(0xFF1C2541),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('صافي المتبقي من الراتب:', style: TextStyle(fontSize: 16)),
+                Text('${widget.employee.remainingSalary} ر.ي', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
+              ],
+            ),
+          ),
+          Expanded(
+            child: widget.employee.entries.isEmpty
+                ? Center(child: Text('لا توجد عمليات مسجلة لهذا الشهر.'))
+                : ListView.builder(
+                    itemCount: widget.employee.entries.length,
+                    itemBuilder: (context, index) {
+                      var adv = widget.employee.entries[index];
+                      return Card(
+                        color: Color(0xFF1C2541),
+                        margin: EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        child: ListTile(
+                          leading: Icon(adv.isDebit ? Icons.arrow_downward : Icons.arrow_upward, color: adv.isDebit ? Colors.greenAccent : Colors.redAccent),
+                          title: Text('مبلغ: ${adv.amount} ر.ي', style: TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text('البيان: ${adv.note}\nالتاريخ: ${adv.date}'),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(15.0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green, padding: EdgeInsets.all(12)),
+                    onPressed: () => _addEntry(true),
+                    child: Text('صرف راتب/استحقاق', style: TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                ),
+                SizedBox(width: 10),
+                Expanded(
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.red, padding: EdgeInsets.all(12)),
+                    onPressed: () => _addEntry(false),
+                    child: Text('صرف سلفة (عليه)', style: TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                ),
+              ],
+            ),
+          )
+        ],
+      ),
+    );
+  }
+}
+
+// 7. واجهة التقارير المالية المتكاملة
+class FinancialReportsPage extends StatelessWidget {
+  final List<Account> customers;
+  final List<Account> suppliers;
+  final List<Expense> expenses;
+  final double profit;
+
+  FinancialReportsPage({required this.customers, required this.suppliers, required this.expenses, required this.profit});
+
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 3,
+      child: Scaffold(
+        backgroundColor: Color(0xFF0B132B),
+        appBar: AppBar(
+          title: Text('التقارير المالية ودفتر اليومية'),
+          bottom: TabBar(
+            indicatorColor: Color(0xFF6FFFE9),
+            tabs: [
+              Tab(text: 'حركة الصندوق'),
+              Tab(text: 'ميزان المراجعة'),
+              Tab(text: 'الأرباح والخسائر'),
+            ],
+          ),
+        ),
+        body: TabBarView(
+          children: [
+            _buildCashflowView(),
+            _buildTrialBalanceView(),
+            _buildProfitLossView(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCashflowView() {
+    List<String> logs = [];
+    double balance = 0.0;
+
+    for (var c in customers) {
+      for (var e in c.entries) {
+        if (e.isDebit) {
+          logs.add("قبض من العميل [${c.name}]: +${e.amount} ر.ي (${e.note})");
+          balance += e.amount;
+        } else {
+          logs.add("صرف للعميل [${c.name}]: -${e.amount} ر.ي (${e.note})");
+          balance -= e.amount;
+        }
+      }
+    }
+    for (var s in suppliers) {
+      for (var e in s.entries) {
+        if (e.isDebit) {
+          logs.add("قبض من المورد [${s.name}]: +${e.amount} ر.ي (${e.note})");
+          balance += e.amount;
+        } else {
+          logs.add("دفع للمورد [${s.name}]: -${e.amount} ر.ي (${e.note})");
+          balance -= e.amount;
+        }
+      }
+    }
+    for (var exp in expenses) {
+      logs.add("مصروف عمومي [${exp.category}]: -${exp.amount} ر.ي (${exp.note})");
+      balance -= exp.amount;
+    }
+
+    return Column(
+      children: [
+        Container(
+          padding: EdgeInsets.all(15),
+          color: Color(0xFF1C2541),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('الرصيد الفعلي الحالي في الصندوق:', style: TextStyle(fontWeight: FontWeight.bold)),
+              Text('$balance ر.ي', style: TextStyle(color: balance >= 0 ? Colors.greenAccent : Colors.red, fontWeight: FontWeight.bold, fontSize: 16)),
+            ],
+          ),
+        ),
+        Expanded(
+          child: logs.isEmpty
+              ? Center(child: Text('لا توجد حركات مالية مسجلة في الصندوق.'))
+              : ListView.builder(
+                  itemCount: logs.length,
+                  itemBuilder: (context, index) => ListTile(
+                    leading: Icon(logs[index].contains('+') ? Icons.add_circle : Icons.remove_circle, color: logs[index].contains('+') ? Colors.green : Colors.red),
+                    title: Text(logs[index], style: TextStyle(fontSize: 13)),
+                  ),
+                ),
+        )
+      ],
+    );
+  }
+
+  Widget _buildTrialBalanceView() {
+    double totalDebit = 0.0;
+    double totalCredit = 0.0;
+
+    for (var c in customers) {
+      if (c.balance < 0) totalDebit += c.balance.abs();
+      if (c.balance > 0) totalCredit += c.balance;
+    }
+    for (var s in suppliers) {
+      if (s.balance < 0) totalDebit += s.balance.abs();
+      if (s.balance > 0) totalCredit += s.balance;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.all(20.0),
+      child: Column(
+        children: [
+          Text('ميزان المراجعة العام للحسابات', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
+          SizedBox(height: 30),
+          _buildBalanceRow('إجمالي أرصدة المدين (المطالبات/الديون لنا)', '$totalDebit ر.ي', Colors.greenAccent),
+          Divider(color: Colors.white24),
+          _buildBalanceRow('إجمالي أرصدة الدائن (المستحقات للناس)', '$totalCredit ر.ي', Colors.redAccent),
+          Divider(color: Colors.white24),
+          SizedBox(height: 20),
+          Text(
+            totalDebit == totalCredit ? "ميزان الحسابات متوازن تماماً" : "توجد فروقات أرصدة معلقة بقيمة ${(totalDebit - totalCredit).abs()} ر.ي",
+            style: TextStyle(color: totalDebit == totalCredit ? Colors.tealAccent : Colors.orangeAccent, fontWeight: FontWeight.bold),
+          )
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBalanceRow(String label, String val, Color col) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: TextStyle(fontSize: 14)),
+          Text(val, style: TextStyle(color: col, fontWeight: FontWeight.bold, fontSize: 16)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProfitLossView() {
+    return Padding(
+      padding: const EdgeInsets.all(20.0),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.pie_chart, size: 80, color: profit >= 0 ? Colors.tealAccent : Colors.red),
+          SizedBox(height: 20),
+          Text('ملخص الأرباح والخسائر التشغيلية:', style: TextStyle(fontSize: 16)),
+          SizedBox(height: 10),
+          Text('$profit ر.ي', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: profit >= 0 ? Colors.tealAccent : Colors.red)),
+          SizedBox(height: 20),
+          Text(
+            profit >= 0 ? "أداء مالي إيجابي - مبيعاتك تتجاوز نفقاتك العامة." : "تنبيه: نفقاتك ومصروفاتك تتجاوز إيراداتك الحالية.",
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white54, fontSize: 13),
+          )
+        ],
+      ),
+    );
+  }
+}
+
+class MarqueeBar extends StatefulWidget {
+  @override
+  _MarqueeBarState createState() => _MarqueeBarState();
+}
+
+class _MarqueeBarState extends State<MarqueeBar> {
+  late ScrollController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = ScrollController();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _startScroll());
+  }
+
+  void _startScroll() async {
+    while (_controller.hasClients) {
+      await Future.delayed(Duration(seconds: 1));
+      if (_controller.hasClients) {
+        await _controller.animateTo(
+          _controller.position.maxScrollExtent,
+          duration: Duration(seconds: 12),
+          curve: Curves.linear,
+        );
+        if (_controller.hasClients) {
+          await _controller.animateTo(0, duration: Duration(milliseconds: 1), curve: Curves.linear);
+        }
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Color(0xFF1C2541),
+      height: 32,
+      child: SingleChildScrollView(
+        controller: _controller,
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            SizedBox(width: 300),
+            Text(
+              "📊 نظام المحاسب المالي لإدارة الديون والقيود | للتفعيل تواصل معنا: +967736666007 📊",
+              style: TextStyle(color: Color(0xFF6FFFE9), fontWeight: FontWeight.bold, fontSize: 13),
+            ),
+            SizedBox(width: 300),
+          ],
+        ),
+      ),
+    );
+  }
+}

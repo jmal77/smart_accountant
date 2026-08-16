@@ -1,0 +1,380 @@
+
+import 'package:url_launcher/url_launcher.dart';
+import 'package:device_info_plus/device_info_plus.dart';
+import 'dart:async';
+
+void main() => runApp(LuxuryWallpaperApp());
+
+class LuxuryWallpaperApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'المعرب الملكي والخلفيات',
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: Color(0xFF0B132B),
+        primaryColor: Color(0xFF6FFFE9),
+        appBarTheme: AppBarTheme(
+          backgroundColor: Color(0xFF1C2541),
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:device_info_plus/device_info_plus.dart';
+import 'dart:async';
+
+void main() => runApp(LuxuryWallpaperApp());
+
+class LuxuryWallpaperApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'المعرب الملكي والخلفيات',
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: Color(0xFF0B132B),
+        primaryColor: Color(0xFF6FFFE9),
+        appBarTheme: AppBarTheme(
+          backgroundColor: Color(0xFF1C2541),
+          elevation: 0,
+        ),
+      ),
+      home: HomePage(),
+    );
+  }
+}
+
+class HomePage extends StatefulWidget {
+  @override
+  _HomePageState createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  String selectedCategory = 'curated';
+  List images = [];
+  bool isLoading = true;
+  final TextEditingController _codeController = TextEditingController();
+
+  // تعريف قناة الاتصال بنظام الأندرويد للتعريب العميق
+  static const platform = MethodChannel('com.jmal.arabic_wallpaper/arabizer');
+
+  final Map<String, String> categories = {
+    'الحديثة 🔥': 'curated',
+    'طبيعة 🌿': 'nature',
+    'سيارات 🏎️': 'luxury cars',
+    'إسلاميات 🕌': 'islamic architecture',
+    'فضاء 🌌': 'galaxy',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    fetchWallpapers(selectedCategory);
+  }
+
+  fetchWallpapers(String query) async {
+    setState(() => isLoading = true);
+    final String apiKey = 'MgNItVpst1K1FyU9vG8OYtkflZw2SbvGfO3GUDZXn9DELeV2JAL9PU1O';
+
+    String url = query == 'curated'
+        ? 'https://api.pexels.com/v1/curated?per_page=30'
+        : 'https://api.pexels.com/v1/search?query=$query&per_page=30';
+
+    try {
+      final response = await http.get(Uri.parse(url), headers: {'Authorization': apiKey});
+      if (response.statusCode == 200) {
+        setState(() {
+          images = json.decode(response.body)['photos'];
+          isLoading = false;
+        });
+      }
+    } catch (e) {
+      print("Error: $e");
+    }
+  }
+
+  // نافذة طلب كود التفعيل المخصصة للمستخدم
+  void _showActivationDialog(BuildContext context) async {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF1C2541),
+        title: Text('تنشيط خدمة التعريب الملكي', style: TextStyle(color: Color(0xFF6FFFE9), fontWeight: FontWeight.bold)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('أدخل مفتاح الترخيص المكون من 12 رمزاً المخصص لجهازك لتفعيل التعريب فوراً:', style: TextStyle(color: Colors.white70, fontSize: 13)),
+            SizedBox(height: 15),
+            TextField(
+              controller: _codeController,
+              style: TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                hintText: 'مثال: ARAB-2026-YES',
+                hintStyle: TextStyle(color: Colors.white24),
+                enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Color(0xFF6FFFE9))),
+                focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white)),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              launchWhatsApp(context); // توجيه لشراء كود من الواتساب
+            },
+            child: Text('شراء مفتاح تنشيط', style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Color(0xFF6FFFE9), foregroundColor: Colors.black),
+            onPressed: () {
+              String enteredCode = _codeController.text.trim();
+              if (enteredCode == "ARAB-2026-YES") { 
+                Navigator.pop(context);
+                _showSuccessDialog(context); // فتح شاشة النجاح وخطوات التفعيل!
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('مفتاح التنشيط غير صحيح أو منتهي الصلاحية!'), backgroundColor: Colors.red),
+                );
+              }
+            },
+            child: Text('تنشيط الآن', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // شاشة النجاح التي تظهر بعد كتابة الكود الصحيح
+  void _showSuccessDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF0B132B),
+        title: Icon(Icons.check_circle, color: Color(0xFF6FFFE9), size: 60),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('تم التحقق من كود التنشيط بنجاح! 🎉', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
+            SizedBox(height: 15),
+            Text(
+              'لتفعيل التعريب على هاتفك الآن، يرجى تشغيل هذا الأمر في الكمبيوتر عبر الـ ADB لمرة واحدة فقط:\n\n'
+              'adb shell am update-config --locale ar-YE',
+              style: TextStyle(color: Colors.tealAccent, fontSize: 13),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Color(0xFF6FFFE9), foregroundColor: Colors.black),
+            onPressed: () => Navigator.pop(context),
+            child: Text('إغلاق', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void launchWhatsApp(BuildContext context) async {
+    DeviceInfoPlugin deviceInfo = DeviceInfoPlugin();
+    String deviceId = "DEV-967-UNKNOWN";
+
+    try {
+      AndroidDeviceInfo androidInfo = await deviceInfo.androidInfo;
+      deviceId = androidInfo.id;
+    } catch (e) {
+      print("Error: $e");
+    }
+
+    String phoneNumber = "967736666007";
+    String message = "السلام عليكم ورحمة الله، أريد تفعيل خدمة تعريب الجهاز.\nرقم الجهاز (Device ID): $deviceId";
+    String whatsappUrl = "https://wa.me/$phoneNumber?text=${Uri.encodeComponent(message)}";
+
+    Uri uri = Uri.parse(whatsappUrl);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('تواصل مع الدعم الفني: +967736666007')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('المعرب الفاخر والخلفيات 4K', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+        centerTitle: true,
+      ),
+      body: Column(
+        children: [
+          MarqueeBar(),
+          Padding(
+            padding: const EdgeInsets.all(12.0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Container(
+                    height: 55,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(colors: [Color(0xFF3A506B), Color(0xFF5BC0BE)]),
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.transparent,
+                        shadowColor: Colors.transparent,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+                      ),
+                      icon: Icon(Icons.language, color: Colors.white, size: 28),
+                      label: Text('تفعيل تعريب الجهاز', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
+                      onPressed: () => _showActivationDialog(context), // تشغيل نافذة التنشيط!
+                    ),
+                  ),
+                ),
+                SizedBox(width: 10),
+                Container(
+                  height: 55,
+                  decoration: BoxDecoration(
+                    color: Color(0xFF1C2541),
+                    borderRadius: BorderRadius.circular(15),
+                  ),
+                  child: IconButton(
+                    icon: Icon(Icons.support_agent, color: Color(0xFF6FFFE9), size: 28),
+                    onPressed: () => launchWhatsApp(context),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            height: 45,
+            padding: EdgeInsets.symmetric(horizontal: 8),
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              children: categories.entries.map((cat) {
+                bool isSelected = selectedCategory == cat.value;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                  child: ChoiceChip(
+                    label: Text(cat.key, style: TextStyle(color: isSelected ? Colors.black : Colors.white)),
+                    selected: isSelected,
+                    selectedColor: Color(0xFF6FFFE9),
+                    backgroundColor: Color(0xFF1C2541),
+                    onSelected: (bool selected) {
+                      if (selected) {
+                        setState(() => selectedCategory = cat.value);
+                        fetchWallpapers(cat.value);
+                      }
+                    },
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+          SizedBox(height: 10),
+          Expanded(
+            child: isLoading
+                ? Center(child: CircularProgressIndicator(color: Color(0xFF6FFFE9)))
+                : GridView.builder(
+                    padding: EdgeInsets.all(8),
+                    itemCount: images.length,
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 2,
+                      crossAxisSpacing: 8,
+                      mainAxisSpacing: 8,
+                      childAspectRatio: 0.55,
+                    ),
+                    itemBuilder: (context, index) {
+                      return GestureDetector(
+                        onTap: () {
+                          showDialog(
+                            context: context,
+                            builder: (context) => Dialog(
+                              backgroundColor: Colors.transparent,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(20),
+                                child: Image.network(
+                                  images[index]['src']['large2x'],
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(15),
+                          child: Container(
+                            color: Color(0xFF1C2541),
+                            child: Image.network(
+                              images[index]['src']['portrait'],
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class MarqueeBar extends StatefulWidget {
+  @override
+  _MarqueeBarState createState() => _MarqueeBarState();
+}
+
+class _MarqueeBarState extends State<MarqueeBar> {
+  late ScrollController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = ScrollController();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _startScroll());
+  }
+
+  void _startScroll() async {
+    while (_controller.hasClients) {
+      await Future.delayed(Duration(seconds: 1));
+      if (_controller.hasClients) {
+        await _controller.animateTo(
+          _controller.position.maxScrollExtent,
+          duration: Duration(seconds: 12),
+          curve: Curves.linear,
+        );
+        if (_controller.hasClients) {
+          await _controller.animateTo(0, duration: Duration(milliseconds: 1), curve: Curves.linear);
+        }
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Color(0xFF1C2541),
+      height: 32,
+      child: SingleChildScrollView(
+        controller: _controller,
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            SizedBox(width: 300),
+            Text(
+              "💎 للتفعيل الفوري وتلقي مفتاح المنتج، تواصل مع الدعم الفني عبر الواتساب: +967736666007 💎 خلفيات 4K حصرية متجددة 💎",
+              style: TextStyle(color: Color(0xFF6FFFE9), fontWeight: FontWeight.bold, fontSize: 13),
+            ),
+            SizedBox(width: 300),
+          ],
+        ),
+      ),
+    );
+  }
+}
