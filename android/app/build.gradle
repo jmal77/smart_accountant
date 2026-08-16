@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace "com.yourcompany.smart_accountant"
-    compileSdk 34
+    compileSdk 36  // ★ تغيير من 34 إلى 36
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -20,7 +20,7 @@ android {
     defaultConfig {
         applicationId "com.yourcompany.smart_accountant"
         minSdkVersion flutter.minSdkVersion
-        targetSdk 34
+        targetSdk 36  // ★ تغيير من 34 إلى 36
         versionCode 1
         versionName "1.0.0"
     }
