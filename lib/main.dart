@@ -11,7 +11,13 @@ import 'constants.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await DatabaseHelper().database;
+  
+  try {
+    await DatabaseHelper().database;
+  } catch (e) {
+    print('Error initializing database: $e');
+  }
+  
   runApp(const SmartAccountantApp());
 }
 
@@ -32,9 +38,13 @@ class _SmartAccountantAppState extends State<SmartAccountantApp> {
   }
 
   Future<void> _loadLang() async {
-    final v = await DatabaseHelper().getSetting('is_arabic_lang');
-    if (mounted) {
-      setState(() => isArabic = v == null ? true : v == 'true');
+    try {
+      final v = await DatabaseHelper().getSetting('is_arabic_lang');
+      if (mounted) {
+        setState(() => isArabic = v == null ? true : v == 'true');
+      }
+    } catch (e) {
+      setState(() => isArabic = true);
     }
   }
 
@@ -47,7 +57,7 @@ class _SmartAccountantAppState extends State<SmartAccountantApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: isArabic ? AppStrings.appName : AppStrings.appNameEn,
+      title: isArabic ? 'المحاسب المالي' : 'Smart Accountant',
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(AppColors.bg),
         primaryColor: const Color(AppColors.gold),
@@ -108,22 +118,26 @@ class _MainHolderPageState extends State<MainHolderPage> {
   }
 
   Future<void> _loadShopSettings() async {
-    final db = DatabaseHelper();
-    final act = await db.getSetting('is_activated');
-    final name = await db.getSetting('shop_name');
-    final phone = await db.getSetting('shop_phone');
-    if (mounted) {
-      setState(() {
-        isActivated = act == 'true';
-        shopName = name ?? shopName;
-        shopPhone = phone ?? shopPhone;
-      });
+    try {
+      final db = DatabaseHelper();
+      final act = await db.getSetting('is_activated');
+      final name = await db.getSetting('shop_name');
+      final phone = await db.getSetting('shop_phone');
+      if (mounted) {
+        setState(() {
+          isActivated = act == 'true';
+          shopName = name ?? shopName;
+          shopPhone = phone ?? shopPhone;
+        });
+      }
+    } catch (e) {
+      print('Error loading shop settings: $e');
     }
   }
 
   Future<String> _getDeviceId() async {
-    final deviceInfo = DeviceInfoPlugin();
     try {
+      final deviceInfo = DeviceInfoPlugin();
       if (Platform.isAndroid) {
         final androidInfo = await deviceInfo.androidInfo;
         return androidInfo.id;
@@ -131,7 +145,9 @@ class _MainHolderPageState extends State<MainHolderPage> {
         final iosInfo = await deviceInfo.iosInfo;
         return iosInfo.identifierForVendor ?? "DEV-967-LOCK";
       }
-    } catch (_) {}
+    } catch (e) {
+      print('Error getting device ID: $e');
+    }
     return "DEV-967-LOCK";
   }
 
